@@ -740,15 +740,12 @@ class ScrewStep(PedicleScrewSimulatorStep):
         selected_level = parts[1].strip()
         selected_side = parts[2].strip()
 
-        # For each screw model node
         allModels = slicer.util.getNodesByClass("vtkMRMLModelNode")
         for modelNode in allModels:
             name = modelNode.GetName()
-            # Only operate on screws
             if not name.startswith("Screw"):
                 continue
 
-            # We expect name format like "Screw Fid1 / L4 / Left"
             screwParts = name.replace("Screw", "").strip().split(" - ")
             if len(screwParts) < 3:
                 continue
@@ -756,7 +753,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
             screw_side = screwParts[2].strip()
 
             # Retrieve the per-slice display nodes
-            # (You must have saved these somewhere previously—e.g. in a dictionary.)
             sliceDisplays = self.screwSliceDisplays.get(modelNode.GetName(), None)
             if not sliceDisplays:
                 # If you never created them or can't find them, skip
@@ -1019,16 +1015,16 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.__parent.validationSucceeded(desiredBranchId)
 
     def updateFiducialComboBox(self):
-        # 1) Clear the Python list and the combo box widget
+        # Clear the Python list and the combo box widget
         self.fiduciallist.clear()
         self.fiducial.clear()
 
-        # 2) Grab the latest fiducial node
+        # Grab the latest fiducial node
         if not self.fidNode:
             logging.debug("No fiducial node found—cannot update combo box.")
             return
 
-        # 3) Loop over control points in the fiducial node and build new entries
+        # Loop over control points in the fiducial node and build new entries
         numPoints = self.fidNode.GetNumberOfControlPoints()
         for i in range(numPoints):
             # Example: extract label, level, side from the BART tables
@@ -1038,7 +1034,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
             combined = f"{label} - {level} - {side}"
             self.fiduciallist.append(combined)
 
-        # 4) Populate the combo box with all new items
+        # Populate the combo box with all new items
         self.fiducial.addItems(self.fiduciallist)
 
         logging.debug(f"Combo box updated with fiduciallist: {self.fiduciallist}")
@@ -1107,5 +1103,123 @@ class ScrewStep(PedicleScrewSimulatorStep):
         super(ScrewStep, self).onExit(goingTo, transitionType)
 
     def doStepProcessing(self):
-
         logging.debug('Done')
+
+        # Create an offset point for each screw
+        screwNodes = slicer.util.getNodesByClass("vtkMRMLModelNode")
+        for screwNode in screwNodes:
+            screwName = screwNode.GetName()
+            if not screwName.startswith("Screw "):
+                continue
+
+            # Get fiducial label from screw name.
+            fidLabel = screwName.replace("Screw ", "").strip()
+
+            # Find the matching entry in self.screwList
+            matchingEntry = None
+            for entry in self.screwList:
+                if not entry:
+                    continue
+                if entry[0] == fidLabel:
+                    matchingEntry = entry
+                    break
+
+            if not matchingEntry:
+                logging.warning(f"No matching screwList entry found for {screwName}")
+                continue
+
+            # Parse screw length (stored as string in matchingEntry[2])
+            try:
+                screwLength = float(matchingEntry[2])
+            except:
+                logging.warning(f"Could not parse screw length for {screwName}")
+                continue
+
+            # Get the transform node that positions/orients the screw
+            transformNode = screwNode.GetParentTransformNode()
+            if not transformNode:
+                continue
+
+            # Retrieve the screw's world (RAS) transformation matrix
+            matrix = vtk.vtkMatrix4x4()
+            transformNode.GetMatrixTransformToWorld(matrix)
+
+            # Extract the screw insertion point (translation) from the matrix
+            screwPosition = [matrix.GetElement(0, 3),
+                             matrix.GetElement(1, 3),
+                             matrix.GetElement(2, 3)]
+
+            # Extract the screw’s forward (alignment) direction from the 2nd column (index 1)
+            direction = [matrix.GetElement(0, 1),
+                         matrix.GetElement(1, 1),
+                         matrix.GetElement(2, 1)]
+            # Normalize the direction vector.
+            lengthVec = math.sqrt(direction[0] ** 2 + direction[1] ** 2 + direction[2] ** 2)
+            if lengthVec < 1e-6:
+                continue
+            direction = [d / lengthVec for d in direction]
+
+            # Compute the new point offset from the screw position by (screwLength + 90) mm
+            offsetDistance = screwLength + 90.0
+            exitPoint = [screwPosition[i] + offsetDistance * direction[i] for i in range(3)]
+
+            # Create a new fiducial for the offset point and hide its display.
+            fiducialName = f"P - {screwName}"
+            exitFidNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", fiducialName)
+            exitFidNode.AddControlPoint(exitPoint, fiducialName)
+            # Hide the newly created fiducial.
+            displayNode = exitFidNode.GetDisplayNode()
+            if displayNode:
+                displayNode.SetVisibility(False)
+
+        # Find the "Reference Point" on the L5 vertebra segmentation
+        try:
+            segmentationNode = slicer.util.getNode("Segmentation")
+        except Exception as e:
+            logging.warning("Segmentation node 'Segmentation' not found.")
+            segmentationNode = None
+
+        if segmentationNode:
+            segmentation = segmentationNode.GetSegmentation()
+            segmentIDs = segmentation.GetSegmentIDs()
+            l5SegmentID = None
+            for segID in segmentIDs:
+                segName = segmentation.GetSegment(segID).GetName()
+                if segName == "L5 vertebra":
+                    l5SegmentID = segID
+                    break
+
+            if l5SegmentID is not None:
+                # Ensure the closed surface representation is created
+                segmentationNode.CreateClosedSurfaceRepresentation()
+                # Create an empty vtkPolyData and pass it to fill with the closed surface
+                polyData = vtk.vtkPolyData()
+                segmentationNode.GetClosedSurfaceRepresentation(l5SegmentID, polyData)
+
+                if polyData and polyData.GetPoints() and polyData.GetPoints().GetNumberOfPoints() > 0:
+                    points = polyData.GetPoints()
+                    numPoints = points.GetNumberOfPoints()
+                    refPoint = None
+                    minY = float('inf')
+                    # The most posterior point will have the smallest y value
+                    for i in range(numPoints):
+                        p = points.GetPoint(i)
+                        if p[1] < minY:
+                            minY = p[1]
+                            refPoint = p
+                    if refPoint is not None:
+                        refFidName = "Reference Point"
+                        refFidNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", refFidName)
+                        refFidNode.AddControlPoint(refPoint, refFidName)
+                        displayNode = refFidNode.GetDisplayNode()
+                        if displayNode:
+                            displayNode.SetVisibility(False)
+                        logging.debug("Reference Point created at: " + str(refPoint))
+                    else:
+                        logging.warning("No point found on L5 vertebra with maximum posterior extent.")
+                else:
+                    logging.warning("Closed surface representation for segment 'L5 vertebra' has no points.")
+            else:
+                logging.warning("Segment 'L5 vertebra' not found in the segmentation node.")
+        else:
+            logging.warning("Segmentation node 'Segmentation' not available.")
