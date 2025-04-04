@@ -1,5 +1,6 @@
 import qt, ctk, vtk, slicer
 import os
+import json
 from .PedicleScrewSimulatorStep import *
 from .Helper import *
 import math
@@ -85,6 +86,10 @@ class GradeStep(PedicleScrewSimulatorStep):
         self.updateTable()
 
     def save3DModel(self):
+        """
+        Save all visible Screw nodes (as .obj) and merged segmentation
+        as a single .obj file. Also export each Screw's transform to a JSON file.
+        """
         folder = qt.QFileDialog.getExistingDirectory(None, "Select Folder to Save Screws and Segmentations")
         if not folder:
             qt.QMessageBox.warning(None, "No Folder Selected", "No folder selected. Cannot save.")
@@ -98,6 +103,9 @@ class GradeStep(PedicleScrewSimulatorStep):
         else:
             print(f"Using existing folder: {newFolderPath}")
 
+        # Dictionary to hold transforms for each screw
+        screwInfo = {}
+
         # Save visible screws
         screwNodes = [
             node for node in slicer.util.getNodesByClass("vtkMRMLModelNode")
@@ -107,11 +115,66 @@ class GradeStep(PedicleScrewSimulatorStep):
             qt.QMessageBox.warning(None, "No Screws Found", "No visible screws found.")
         else:
             for node in screwNodes:
-                if node.GetParentTransformNode():
+                screwName = node.GetName()  # e.g., "Screw FidName"
+                transformNode = node.GetParentTransformNode()
+                if transformNode:
+                    # Retrieve the 4x4 transform
+                    transformMatrix = vtk.vtkMatrix4x4()
+                    transformNode.GetMatrixTransformToParent(transformMatrix)
+
+                    # Convert matrix to a nested Python list
+                    matrixAsList = [
+                        [transformMatrix.GetElement(r, c) for c in range(4)]
+                        for r in range(4)
+                    ]
+                else:
+                    # If no transform node, use identity
+                    matrixAsList = [
+                        [1.0 if r == c else 0.0 for c in range(4)]
+                        for r in range(4)
+                    ]
+
+                # Attempt to obtain screw size from self.screwList using fiducial information.
+                # Assumes the screw node name is "Screw <fidName>"
+                fidName = screwName.replace("Screw ", "")
+                screwSize = "unknown"
+                if hasattr(self, "fiduciallist") and fidName in self.fiduciallist:
+                    index = self.fiduciallist.index(fidName)
+                    if hasattr(self, "screwList") and index < len(self.screwList):
+                        currentScrew = self.screwList[index]
+                        # For example, assume currentScrew is a list like [location, diameter, length]
+                        screwSize = f"{currentScrew[1]} x {currentScrew[2]}"
+
+                # Store transform and size info in the dictionary
+                screwInfo[screwName] = {
+                    "transform": matrixAsList,
+                    "size": screwSize
+                }
+
+                # Harden the transform so the saved OBJ has baked-in geometry
+                if transformNode:
                     node.HardenTransform()
-                savePath = os.path.join(newFolderPath, f"{node.GetName()}.obj")
+
+                # Save the screw geometry as OBJ
+                savePath = os.path.join(newFolderPath, f"{screwName}.obj")
                 slicer.util.saveNode(node, savePath)
-                print(f"Saved screw '{node.GetName()}' to {savePath}")
+                print(f"Saved screw '{screwName}' to {savePath}")
+
+                # Remove the .mtl file if it exists
+                mtlPath = savePath.replace(".obj", ".mtl")
+                if os.path.exists(mtlPath):
+                    try:
+                        os.remove(mtlPath)
+                        print(f"Removed .mtl file at: {mtlPath}")
+                    except Exception as e:
+                        print(f"Could not remove .mtl file: {str(e)}")
+
+        # Write all screw info (transforms and size) to a JSON file
+        if screwInfo:
+            infoJsonPath = os.path.join(newFolderPath, "screw_info.json")
+            with open(infoJsonPath, "w") as fp:
+                json.dump(screwInfo, fp, indent=2)
+            print(f"Screw info written to: {infoJsonPath}")
 
         # Merge and save visible segmentations
         segNodes = [
@@ -137,12 +200,12 @@ class GradeStep(PedicleScrewSimulatorStep):
         mergedNode.SetAndObservePolyData(appendFilter.GetOutput())
 
         mergedFilePath = os.path.join(newFolderPath, "MergedSegmentation.obj")
-        slicer.util.saveNode(mergedNode, mergedFilePath)
+        # slicer.util.saveNode(mergedNode, mergedFilePath)
 
         qt.QMessageBox.information(
             None,
             "Saved Successfully",
-            f"Screws and merged segmentations saved to:\n{newFolderPath}"
+            f"Screws saved to:\n{newFolderPath}"
         )
 
     def onTableCellClicked(self):
@@ -385,13 +448,13 @@ class GradeStep(PedicleScrewSimulatorStep):
 
         """
         if not segmentationNode:
-            return "E"
+            return "E: No Segmentation"
 
         # Crop the head
         shaftPolyData = self.cropScrew(screwModelNode, 'head')
         if (not shaftPolyData) or (shaftPolyData.GetNumberOfPoints() == 0):
             # No coverage => Grade E
-            return "E"
+            return "E: No Coverage"
 
         # Make a temporary shaft model node
         shaftModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TempShaft")
@@ -441,7 +504,7 @@ class GradeStep(PedicleScrewSimulatorStep):
 
         elif coverage == "No":
             # No coverage => E
-            finalGrade = "E"
+            finalGrade = "E: No Coverage"
 
         else:
             # create outside portion + measure max distance
@@ -487,7 +550,7 @@ class GradeStep(PedicleScrewSimulatorStep):
                     elif maxDistance <= 6.0:
                         finalGrade = "D"
                     else:
-                        finalGrade = "E"
+                        finalGrade = "E: >6mm"
 
                     # create the line model for vector
                     if maxDistance > 0.0:
@@ -507,7 +570,7 @@ class GradeStep(PedicleScrewSimulatorStep):
                         lineModelNode.SetAndObserveDisplayNodeID(lineDisplay.GetID())
 
             else:
-                finalGrade = "E"
+                finalGrade = "E: No Outside Model"
 
         # Cleanup
         slicer.mrmlScene.RemoveNode(shaftModelNode)
