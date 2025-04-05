@@ -1,6 +1,7 @@
 import numpy as np
 import vtk
 import logging
+import slicer
 
 logger = logging.getLogger(__name__)
 
@@ -283,65 +284,175 @@ def gen_traj(origin_transform, target_transform):
         logger.error(traceback.format_exc())
         return np.array([0, 1, 0])  # Default to anterior direction
 
-def sample_ct_along_trajectory(volume_node, origin, direction, length, num_samples=50):
+def sample_along_trajectory(volume_node, mask_node, start_point, direction, length, num_samples=50):
     """
-    Sample CT values along a trajectory line.
+    Sample CT values and mask values along a trajectory using Bresenham's algorithm.
     
     Parameters:
         volume_node (vtkMRMLScalarVolumeNode): CT volume node
-        origin (array): [x, y, z] start point in RAS
-        direction (array): Normalized direction vector
+        mask_node (vtkMRMLLabelMapVolumeNode): Segmentation mask
+        start_point (array): Starting point [x, y, z] in RAS coordinates
+        direction (array): Direction vector (normalized)
         length (float): Length of trajectory
-        num_samples (int): Number of points to sample
+        num_samples (int): Number of samples to take
         
     Returns:
-        array: Array of sampled density values
+        tuple: (ct_samples, mask_samples) Arrays of CT and mask values
     """
+    import numpy as np
+    import vtk
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
     try:
-        if not volume_node or not hasattr(volume_node, 'GetImageData'):
-            logger.warning("Invalid volume node")
-            return np.array([])
-            
-        # Get image data
-        image_data = volume_node.GetImageData()
-        if not image_data:
-            logger.warning("No image data in volume node")
-            return np.array([])
-            
-        # Get RAS to IJK transform
-        ras_to_ijk = vtk.vtkMatrix4x4()
-        volume_node.GetRASToIJKMatrix(ras_to_ijk)
+        # Convert to numpy arrays if not already
+        start_point = np.array(start_point)
+        direction = np.array(direction) / np.linalg.norm(direction)  # Ensure normalized
         
-        # Sample points along trajectory
-        density_values = []
+        # Calculate end point
+        end_point = start_point + direction * length
         
-        for i in range(num_samples):
-            t = i / (num_samples - 1)
-            point_ras = origin + t * direction * length
-            
-            # Convert RAS to IJK
-            point_ijk = np.zeros(4)
-            ras_point = np.append(point_ras, 1.0)
-            ras_to_ijk.MultiplyPoint(ras_point, point_ijk)
-            
-            # Convert to integer voxel coordinates
-            ijk = [int(round(point_ijk[j])) for j in range(3)]
-            
-            # Check if point is within volume bounds
-            dims = image_data.GetDimensions()
-            if (0 <= ijk[0] < dims[0] and 
-                0 <= ijk[1] < dims[1] and 
-                0 <= ijk[2] < dims[2]):
+        # Get RAS to IJK matrices
+        volume_ras_to_ijk = vtk.vtkMatrix4x4()
+        mask_ras_to_ijk = vtk.vtkMatrix4x4()
+        
+        volume_node.GetRASToIJKMatrix(volume_ras_to_ijk)
+        mask_node.GetRASToIJKMatrix(mask_ras_to_ijk)
+        
+        # Convert start and end points to IJK coordinates
+        start_ijk = np.zeros(4)
+        end_ijk = np.zeros(4)
+        
+        volume_ras_to_ijk.MultiplyPoint(np.append(start_point, 1.0), start_ijk)
+        volume_ras_to_ijk.MultiplyPoint(np.append(end_point, 1.0), end_ijk)
+        
+        # Round to integers for Bresenham
+        start_ijk = np.round(start_ijk[:3]).astype(int)
+        end_ijk = np.round(end_ijk[:3]).astype(int)
+        
+        # Get volume dimensions
+        volume_image = volume_node.GetImageData()
+        volume_dims = volume_image.GetDimensions()
+        
+        # Get mask dimensions
+        mask_image = mask_node.GetImageData()
+        mask_dims = mask_image.GetDimensions()
+        
+        # Initialize points list
+        points = []
+        
+        # Add the starting point
+        points.append((start_ijk[0], start_ijk[1], start_ijk[2]))
+        
+        # Use Bresenham's 3D line algorithm
+        # Based on https://www.geeksforgeeks.org/bresenhams-algorithm-for-3d-line-drawing/
+        x1, y1, z1 = start_ijk
+        x2, y2, z2 = end_ijk
+        
+        dx = abs(x2 - x1)
+        dy = abs(y2 - y1)
+        dz = abs(z2 - z1)
+        
+        xs = 1 if x2 > x1 else -1
+        ys = 1 if y2 > y1 else -1
+        zs = 1 if z2 > z1 else -1
+        
+        # Choosing the driving axis
+        if dx >= dy and dx >= dz:
+            p1 = 2 * dy - dx
+            p2 = 2 * dz - dx
+            while x1 != x2:
+                x1 += xs
+                if p1 >= 0:
+                    y1 += ys
+                    p1 -= 2 * dx
+                if p2 >= 0:
+                    z1 += zs
+                    p2 -= 2 * dx
+                p1 += 2 * dy
+                p2 += 2 * dz
+                points.append((x1, y1, z1))
+        elif dy >= dx and dy >= dz:
+            p1 = 2 * dx - dy
+            p2 = 2 * dz - dy
+            while y1 != y2:
+                y1 += ys
+                if p1 >= 0:
+                    x1 += xs
+                    p1 -= 2 * dy
+                if p2 >= 0:
+                    z1 += zs
+                    p2 -= 2 * dy
+                p1 += 2 * dx
+                p2 += 2 * dz
+                points.append((x1, y1, z1))
+        else:
+            p1 = 2 * dy - dz
+            p2 = 2 * dx - dz
+            while z1 != z2:
+                z1 += zs
+                if p1 >= 0:
+                    y1 += ys
+                    p1 -= 2 * dz
+                if p2 >= 0:
+                    x1 += xs
+                    p2 -= 2 * dz
+                p1 += 2 * dy
+                p2 += 2 * dx
+                points.append((x1, y1, z1))
+        
+        # Sample at evenly spaced points along the line
+        if len(points) > num_samples:
+            # Subsample if we have more points than needed
+            indices = np.linspace(0, len(points)-1, num_samples, dtype=int)
+            points = [points[i] for i in indices]
+        
+        # Initialize arrays for CT and mask values
+        ct_samples = []
+        mask_samples = []
+        
+        # Sample values at each point
+        for x, y, z in points:
+            # Check if point is within CT volume bounds
+            if (0 <= x < volume_dims[0] and 0 <= y < volume_dims[1] and 0 <= z < volume_dims[2]):
+                # Get CT value
+                ct_value = volume_image.GetScalarComponentAsDouble(x, y, z, 0)
+                ct_samples.append(ct_value)
                 
-                # Get voxel value (HU)
-                value = image_data.GetScalarComponentAsDouble(ijk[0], ijk[1], ijk[2], 0)
-                density_values.append(value)
+                # Convert to mask IJK coordinates if needed
+                mask_x, mask_y, mask_z = x, y, z
+                if mask_ras_to_ijk != volume_ras_to_ijk:
+                    # If mask has different IJK space, convert RAS to mask IJK
+                    ras_point = np.zeros(4)
+                    ijk_to_ras = vtk.vtkMatrix4x4()
+                    volume_node.GetIJKToRASMatrix(ijk_to_ras)
+                    ijk_to_ras.MultiplyPoint([x, y, z, 1], ras_point)
+                    
+                    mask_ijk = np.zeros(4)
+                    mask_ras_to_ijk.MultiplyPoint(ras_point, mask_ijk)
+                    mask_x, mask_y, mask_z = np.round(mask_ijk[:3]).astype(int)
+                
+                # Check if point is within mask volume bounds
+                if (0 <= mask_x < mask_dims[0] and 0 <= mask_y < mask_dims[1] and 0 <= mask_z < mask_dims[2]):
+                    # Get mask value (0 = outside, >0 = inside)
+                    mask_value = mask_image.GetScalarComponentAsDouble(mask_x, mask_y, mask_z, 0)
+                    mask_samples.append(mask_value)
+                else:
+                    # If outside mask bounds, treat as outside segmentation
+                    mask_samples.append(0)
+            else:
+                # If outside CT bounds, use defaults
+                ct_samples.append(0)
+                mask_samples.append(0)
         
-        return np.array(density_values)
+        return np.array(ct_samples), np.array(mask_samples)
         
     except Exception as e:
-        logger.error(f"Error in sample_ct_along_trajectory: {str(e)}")
-        return np.array([])
+        logger.error(f"Error in sample_along_trajectory: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return np.array([]), np.array([])
 
 def compute_safety_margin(trajectory_points, vertebra_model):
     """
@@ -386,8 +497,8 @@ def compute_safety_margin(trajectory_points, vertebra_model):
     
 def distance_cost(insertion_point, trajectory_direction, pedicle_center):
     """
-    Calculate only the distance cost component - how close is the trajectory to the pedicle center.
-    This function includes detailed debugging information.
+    Calculate the perpendicular distance from the trajectory line to the pedicle center.
+    This is a critical cost component that helps place the trajectory near the center of the pedicle.
     
     Parameters:
         insertion_point (array): 3D coordinates of insertion point
@@ -412,7 +523,7 @@ def distance_cost(insertion_point, trajectory_direction, pedicle_center):
         trajectory_direction = np.array(trajectory_direction, dtype=np.float64)
         pedicle_center = np.array(pedicle_center, dtype=np.float64)
         
-        # Normalize the trajectory direction
+        # Normalize direction vector
         direction_mag = np.linalg.norm(trajectory_direction)
         if direction_mag < 1e-6:
             logger.warning("Trajectory direction vector is too short")
@@ -420,38 +531,26 @@ def distance_cost(insertion_point, trajectory_direction, pedicle_center):
             
         normalized_direction = trajectory_direction / direction_mag
         
-        # Debug inputs
-        logger.debug(f"distance_cost inputs:")
-        logger.debug(f"  insertion_point: {insertion_point}")
-        logger.debug(f"  normalized_direction: {normalized_direction}")
-        logger.debug(f"  pedicle_center: {pedicle_center}")
-        
         # Vector from insertion point to pedicle center
         vec_to_center = pedicle_center - insertion_point
-        logger.debug(f"  vec_to_center: {vec_to_center}")
         
         # Project this vector onto the trajectory direction
         dot_product = np.dot(vec_to_center, normalized_direction)
         projection = normalized_direction * dot_product
-        logger.debug(f"  dot_product: {dot_product}")
-        logger.debug(f"  projection: {projection}")
         
         # The perpendicular component is the difference
         perpendicular_vector = vec_to_center - projection
-        logger.debug(f"  perpendicular_vector: {perpendicular_vector}")
         
         # The distance is the magnitude of this perpendicular component
         distance = np.linalg.norm(perpendicular_vector)
-        logger.debug(f"  distance: {distance}")
         
         # Calculate the closest point on the trajectory to the pedicle center
         closest_point = insertion_point + projection
-        logger.debug(f"  closest_point: {closest_point}")
         
         # If the dot product is negative, the projection is behind the insertion point
         # (pedicle center is behind trajectory origin)
         if dot_product < 0:
-            logger.debug("  projection is behind insertion point")
+            logger.debug("Pedicle center is behind trajectory origin")
             
         # If distance is greater than a threshold, apply a penalty
         # This helps avoid positions where the trajectory is very far from the pedicle
@@ -460,7 +559,7 @@ def distance_cost(insertion_point, trajectory_direction, pedicle_center):
             # Apply a quadratic penalty for distances beyond the threshold
             penalty = 1.0 + ((distance - threshold) / threshold) ** 2
             distance *= penalty
-            logger.debug(f"  applied distance penalty: {penalty}, adjusted distance: {distance}")
+            logger.debug(f"Applied distance penalty: {penalty}, adjusted distance: {distance}")
         
         return distance
         
@@ -469,6 +568,56 @@ def distance_cost(insertion_point, trajectory_direction, pedicle_center):
         import traceback
         logger.error(traceback.format_exc())
         return float('inf')
+    
+def bone_density_cost(insertion_point, trajectory_direction, volume_node, mask_node, trajectory_length, num_samples=50):
+    """
+    Calculate cost based on bone density along the trajectory.
+    Higher density (cortical bone) is preferred for stronger fixation.
+    
+    Parameters:
+        insertion_point (array): 3D coordinates of insertion point
+        trajectory_direction (array): Unit vector of trajectory direction
+        volume_node (vtkMRMLScalarVolumeNode): CT volume node
+        mask_node (vtkMRMLLabelMapVolumeNode): Segmentation mask
+        trajectory_length (float): Maximum length of trajectory
+        num_samples (int): Number of points to sample along trajectory
+        
+    Returns:
+        float: Density cost value (higher is better)
+    """
+    import numpy as np
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Sample CT values and mask values along the trajectory using Bresenham's algorithm
+        ct_samples, mask_samples = sample_along_trajectory(
+            volume_node, 
+            mask_node,
+            insertion_point, 
+            trajectory_direction, 
+            trajectory_length, 
+            num_samples
+        )
+        
+        if len(ct_samples) == 0:
+            logger.warning("No samples collected along trajectory")
+            return -1000.0  # Large negative penalty for invalid trajectory
+        
+        # Calculate the average HU value along the trajectory
+        # Higher HU values (cortical bone) are better for screw fixation
+        density = np.sum(ct_samples)
+        
+        # Return the mean density directly as a positive cost factor
+        # Higher density = higher return value = better trajectory
+        return density
+        
+    except Exception as e:
+        logger.error(f"Error in bone_density_cost: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return -1000.0  # Large negative penalty on error
 
 def cost_total(
     insertion_point, 
@@ -478,83 +627,50 @@ def cost_total(
     pedicle_center,
     weights,
     volume_node,
+    mask_node,
     trajectory_length
 ):
     """
-    Calculate the cost of a trajectory based primarily on distance to pedicle center.
-    This function has been simplified to focus only on the distance cost for debugging.
+    Calculate the total cost of a trajectory:
+    1. Distance from pedicle center (minimize)
+    2. Inverse of bone density along trajectory (minimize)
     
     Parameters:
-        insertion_point (array): 3D coordinates of insertion point
-        trajectory_direction (array): Unit vector of trajectory direction
-        vertebra_model (vtkPolyData): Surface model of the vertebra (unused in distance-only mode)
-        pedicle_axis (array): Principal axis of the pedicle from PCA (unused in distance-only mode)
-        pedicle_center (array): 3D coordinates of pedicle center
-        weights (array): Weights for different cost components [distance, angle, boundary, density]
-        volume_node (vtkMRMLScalarVolumeNode): CT volume node (unused in distance-only mode)
-        trajectory_length (float): Maximum length of trajectory (unused in distance-only mode)
+        insertion_point: 3D coordinates of insertion point
+        trajectory_direction: Unit vector of trajectory direction
+        vertebra_model: Surface model of the vertebra
+        pedicle_axis: Principal axis of the pedicle
+        pedicle_center: 3D coordinates of pedicle center
+        weights: Weights for different cost components [distance, density]
+        volume_node: CT volume node
+        mask_node: Segmentation mask
+        trajectory_length: Maximum length of trajectory
         
     Returns:
         tuple: (total_cost, cost_components)
     """
-    import numpy as np
-    import logging
+    # Calculate distance cost (minimize)
+    distance_value = distance_cost(insertion_point, trajectory_direction, pedicle_center)
     
-    logger = logging.getLogger(__name__)
-    cost_components = {"distance": 0.0, "angle": 0.0, "safety": 0.0, "density": 0.0}
+    # Calculate density cost (maximize original value, so negate for minimization)
+    density_value = bone_density_cost(insertion_point, trajectory_direction, volume_node, mask_node, trajectory_length)
     
-    # Validate key inputs
-    if insertion_point is None or np.any(np.isnan(insertion_point)):
-        logger.warning("Invalid insertion point")
-        return float('inf'), cost_components
-        
-    if trajectory_direction is None or np.any(np.isnan(trajectory_direction)):
-        logger.warning("Invalid trajectory direction")
-        return float('inf'), cost_components
-        
-    if pedicle_center is None or np.any(np.isnan(pedicle_center)):
-        logger.warning("Invalid pedicle center")
-        if insertion_point is not None:
-            pedicle_center = insertion_point  # Fallback
-        else:
-            return float('inf'), cost_components
-    
-    # Calculate distance cost using the enhanced function
-    try:
-        from .CostFunctions import distance_cost
-        cost_components["distance"] = distance_cost(insertion_point, trajectory_direction, pedicle_center)
-    except Exception as e:
-        logger.error(f"Error importing or calling distance_cost: {str(e)}")
-        
-        # Fallback direct implementation
-        try:
-            # Normalize direction
-            direction_mag = np.linalg.norm(trajectory_direction)
-            if direction_mag < 1e-6:
-                logger.warning("Trajectory direction is too short")
-                cost_components["distance"] = float('inf')
-            else:
-                normalized_direction = trajectory_direction / direction_mag
-                
-                # Calculate perpendicular distance
-                vec_to_center = pedicle_center - insertion_point
-                projection = np.dot(vec_to_center, normalized_direction) * normalized_direction
-                perpendicular_vector = vec_to_center - projection
-                cost_components["distance"] = np.linalg.norm(perpendicular_vector)
-        except Exception as e2:
-            logger.error(f"Error in fallback distance calculation: {str(e2)}")
-            cost_components["distance"] = float('inf')
-    
-    # Log the cost components for debugging
-    logger.debug(f"Cost components: {cost_components}")
-    
-    # Apply weight to distance cost only
-    if weights is not None and len(weights) > 0:
-        total_cost = weights[0] * cost_components["distance"]
+    # Since we want to maximize the density but minimize the distance,
+    # we need to invert the density cost
+    if density_value > 0:
+        # Normal case - invert density value to convert maximization to minimization
+        density_cost = -density_value  # Negative so lower values (to minimize) = higher density
     else:
-        total_cost = cost_components["distance"]
+        # Penalty case (outside segmentation) - keep the negative value
+        density_cost = density_value
     
-    logger.debug(f"Total weighted cost: {total_cost}")
+    # Apply weights
+    if weights is not None and len(weights) >= 2:
+        total_cost = weights[0] * distance_value + weights[1] * density_cost
+    else:
+        total_cost = distance_value + density_cost
+    
+    cost_components = {"distance": distance_value, "density": density_cost}
     
     return total_cost, cost_components
 

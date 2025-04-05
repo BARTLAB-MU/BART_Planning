@@ -1185,8 +1185,8 @@ class ScrewStep(PedicleScrewSimulatorStep):
                     # Set the weight vector with high weight on distance cost, zero on others
                     self.autoPlanner = PedicleScrewAutoPlanner(
                         resolution=200,  # Lower resolution for faster results
-                        reach=100,
-                        weight=[1.0, 0.0, 0.0, 0.0],  # Only use distance cost
+                        reach= int(self.__length),
+                        weight=[1.0, 0],
                         progress_callback=progress_callback
                     )
                 else:
@@ -1219,7 +1219,6 @@ class ScrewStep(PedicleScrewSimulatorStep):
                     self.autoPlanner.progress_callback = progress_callback
                     
                     # Update weights to focus only on distance cost
-                    self.autoPlanner.weight = [1.0, 0.0, 0.0, 0.0]
                 
                 # Run the trajectory planning
                 progressDialog.setValue(40)

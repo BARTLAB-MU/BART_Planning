@@ -2,13 +2,14 @@ import numpy as np
 from .RobotInit import Robot
 from .CostFunctions import cost_total, gen_traj
 import logging
+import slicer
 
 class PedicleScrewAutoPlanner:
     """
     Automatic trajectory planning for pedicle screws using robot kinematics
     and cost function optimization.
     """
-    def __init__(self, resolution=1000, reach=100, weight=None, progress_callback=None):
+    def __init__(self, resolution=1000, reach=50, weight=None, progress_callback=None):
         """
         Initialize the auto planner with the specified parameters.
         
@@ -19,7 +20,7 @@ class PedicleScrewAutoPlanner:
             progress_callback: Function to report progress (phase, iteration, max_iterations)
         """
         if weight is None:
-            weight = [300, 1, 30, 0.05]
+            weight = [1.0, 0.01]
         
         self.resolution = resolution
         self.reach = reach
@@ -37,6 +38,7 @@ class PedicleScrewAutoPlanner:
     def plan_trajectory(self, vertebra, insertion_point):
         """
         Plan optimal trajectory for a given vertebra and insertion point.
+        Uses screw length from measurements to set trajectory reach.
         
         Parameters:
             vertebra: Vertebra object containing anatomical information
@@ -97,6 +99,19 @@ class PedicleScrewAutoPlanner:
         if not hasattr(vertebra, 'maskedVolume') or vertebra.maskedVolume is None:
             self.logger.warning("No masked volume available for density calculation")
         
+        # Get mask node for density calculation
+        mask_node = None
+        if hasattr(vertebra, 'mask_node') and vertebra.mask_node is not None:
+            mask_node = vertebra.mask_node
+        else:
+            self.logger.warning("No mask node available for density calculation")
+        
+        # Update weights to use distance and density costs appropriately
+        if not hasattr(vertebra, 'maskedVolume') or vertebra.maskedVolume is None:
+            self.weight = [1.0, 0.0]  # Only use distance cost when no volume is available
+        else:
+            self.weight = [1.0, 0.01]  # Use both costs when volume is available
+        
         # Phase 1: Search in first joint space
         self.logger.info("Phase 1: Searching in first joint space")
         cost_h1 = np.full(self.resolution, float('inf'))
@@ -123,18 +138,20 @@ class PedicleScrewAutoPlanner:
             traj = gen_traj(insertion_transform, transform)
             
             try:
-                # Calculate cost for this trajectory
-                total_cost, _ = cost_total(
+                # Calculate cost for this trajectory using only distance and density costs
+                total_cost, cost_components = cost_total(
                     insertion_point, 
                     traj,
                     vertebra.point_cloud, 
                     pedicle_axis, 
                     pedicle_center,
                     self.weight, 
-                    vertebra.maskedVolume, 
+                    vertebra.maskedVolume,
+                    mask_node if mask_node else None,
                     self.reach
                 )
                 cost_h1[i] = total_cost
+                self.logger.info(f"Searched {transform}: {cost_components}")
             except Exception as e:
                 self.logger.error(f"Error calculating cost for joint 1, position {i}: {str(e)}")
                 cost_h1[i] = float('inf')
@@ -179,7 +196,7 @@ class PedicleScrewAutoPlanner:
             traj = gen_traj(insertion_transform, transform)
             
             try:
-                # Calculate cost for this trajectory
+                # Calculate cost for this trajectory using only distance and density costs
                 total_cost, _ = cost_total(
                     insertion_point, 
                     traj,
@@ -187,10 +204,12 @@ class PedicleScrewAutoPlanner:
                     pedicle_axis, 
                     pedicle_center,
                     self.weight, 
-                    vertebra.maskedVolume, 
+                    vertebra.maskedVolume,
+                    mask_node if mask_node else None,
                     self.reach
                 )
                 cost_h2[i] = total_cost
+                self.logger.info(f"Searched {transform}: {cost_components}")
             except Exception as e:
                 self.logger.error(f"Error calculating cost for joint 2, position {i}: {str(e)}")
                 cost_h2[i] = float('inf')
