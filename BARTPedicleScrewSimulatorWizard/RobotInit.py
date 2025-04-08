@@ -77,7 +77,8 @@ class Robot:
             rot_transform[0:3,0:3] = rot_matrix
 
             trans_transform = np.eye(4)
-            trans_transform[1,3] = self.reach
+            trans_transform[0,3] = self.reach * np.cos(np.deg2rad(angle))
+            trans_transform[1,3] = self.reach * np.sin(np.deg2rad(angle))
             
             # Create transform with rotation and translation
             transform = rot_transform @ trans_transform
