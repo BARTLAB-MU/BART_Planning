@@ -243,46 +243,26 @@ def point_to_line_distance(point, line_origin, line_direction):
         logger.error(traceback.format_exc())
         return float('inf')
 
-def gen_traj(origin_transform, target_transform):
+def gen_traj(base, ee):
     """
-    Generate trajectory vector from origin to target.
+    Generate trajectory vector from base to end-effector.
     
     Parameters:
-        origin_transform (array): 4x4 homogeneous transform for origin
-        target_transform (array): 4x4 homogeneous transform for target
+        base: 4x4 transformation matrix for base
+        ee: 4x4 transformation matrix for end-effector
         
     Returns:
         array: Normalized direction vector
     """
-    import numpy as np
-    import logging
+    # Extract translation components
+    base_coord = base[0:3, 3]
+    ee_coord = ee[0:3, 3]
     
-    logger = logging.getLogger(__name__)
+    # Calculate direction vector
+    vec = ee_coord - base_coord
     
-    try:
-        # Get translation components from transforms
-        if origin_transform.shape != (4, 4) or target_transform.shape != (4, 4):
-            logger.warning(f"Invalid transform shapes: {origin_transform.shape}, {target_transform.shape}")
-            return np.array([0, 1, 0])  # Default direction (anterior)
-            
-        origin_pos = origin_transform[0:3, 3]
-        target_pos = target_transform[0:3, 3]
-        
-        # Calculate direction vector
-        direction = target_pos - origin_pos
-        direction_mag = np.linalg.norm(direction)
-        
-        if direction_mag < 1e-6:
-            logger.warning("Generated trajectory is too short")
-            return np.array([0, 1, 0])  # Default to anterior direction
-            
-        return direction / direction_mag
-        
-    except Exception as e:
-        logger.error(f"Error in gen_traj: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return np.array([0, 1, 0])  # Default to anterior direction
+    # Normalize
+    return vec / np.linalg.norm(vec)
 
 def sample_along_trajectory(volume_node, mask_node, start_point, direction, length, num_samples=50):
     """

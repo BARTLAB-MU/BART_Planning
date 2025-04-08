@@ -76,15 +76,6 @@ class PedicleScrewAutoPlanner:
         
         self.logger.info(f"Pedicle center: {pedicle_center}")
         
-        # Get pedicle axis (PCA vector)
-        pedicle_axis = None
-        if hasattr(vertebra, 'pcaVectors') and vertebra.pcaVectors is not None:
-            pedicle_axis = vertebra.pcaVectors[:, 2]  # Use 3rd principal component
-        else:
-            # Default to vertical axis if PCA not available
-            pedicle_axis = np.array([0, 1, 0])
-            self.logger.warning("Using default vertical axis (no PCA vectors found)")
-        
         # Get point cloud for collision detection
         if not hasattr(vertebra, 'point_cloud') or vertebra.point_cloud is None:
             self.logger.warning("No point cloud available for collision detection")
@@ -106,15 +97,11 @@ class PedicleScrewAutoPlanner:
         else:
             self.logger.warning("No mask node available for density calculation")
         
-        # Update weights to use distance and density costs appropriately
-        if not hasattr(vertebra, 'maskedVolume') or vertebra.maskedVolume is None:
-            self.weight = [1.0, 0.0]  # Only use distance cost when no volume is available
-        else:
-            self.weight = [1.0, 0.01]  # Use both costs when volume is available
-        
         # Phase 1: Search in first joint space
         self.logger.info("Phase 1: Searching in first joint space")
         cost_h1 = np.full(self.resolution, float('inf'))
+
+        pedicle_axis = None
         
         for i in range(self.resolution):
             # Report progress
@@ -131,7 +118,7 @@ class PedicleScrewAutoPlanner:
                     # Continue even if the callback has an error
             
             # Get transform for this joint position
-            h1_i = self.robot.link_1.transform[:, :, i]
+            h1_i = self.robot.link_1[:, :, i]
             transform = insertion_transform @ h1_i @ self.h2_mean
             
             # Calculate trajectory direction
@@ -165,8 +152,8 @@ class PedicleScrewAutoPlanner:
             self.logger.warning("No valid solution found in phase 1")
             return np.array([0, 1, 0]), (0, 0), float('inf')
         
-        h1_best = self.robot.link_1.transform[:, :, min_cost_idx]
-        joint1_angle = self.robot.link_1.joint_limit[min_cost_idx]
+        h1_best = self.robot.link_1[:, :, min_cost_idx]
+        joint1_angle = self.robot.joint_1_limit[min_cost_idx]
         
         self.logger.info(f"Phase 1 complete. Best joint index: {min_cost_idx}, Cost: {min_cost}, Angle: {joint1_angle}")
         
@@ -189,7 +176,7 @@ class PedicleScrewAutoPlanner:
                     # Continue even if the callback has an error
             
             # Get transform for this joint position
-            h2_i = self.robot.link_2.transform[:, :, i]
+            h2_i = self.robot.link_2[:, :, i]
             transform = insertion_transform @ h1_best @ h2_i
             
             # Calculate trajectory direction
@@ -223,8 +210,8 @@ class PedicleScrewAutoPlanner:
             self.logger.warning("No valid solution found in phase 2")
             return np.array([0, 1, 0]), (0, 0), float('inf')
         
-        h2_best = self.robot.link_2.transform[:, :, min_cost_idx]
-        joint2_angle = self.robot.link_2.joint_limit[min_cost_idx]
+        h2_best = self.robot.link_2[:, :, min_cost_idx]
+        joint2_angle = self.robot.joint_2_limit[min_cost_idx]
         
         self.logger.info(f"Phase 2 complete. Best joint index: {min_cost_idx}, Cost: {min_cost}, Angle: {joint2_angle}")
         
