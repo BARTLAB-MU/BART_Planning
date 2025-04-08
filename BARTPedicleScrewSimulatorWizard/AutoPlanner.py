@@ -153,7 +153,7 @@ class PedicleScrewAutoPlanner:
             return np.array([0, 1, 0]), (0, 0), float('inf')
         
         h1_best = self.robot.link_1[:, :, min_cost_idx]
-        joint1_angle = self.robot.joint_1_limit[min_cost_idx]
+        joint1_angle = self.robot.joint_1_space[min_cost_idx]
         
         self.logger.info(f"Phase 1 complete. Best joint index: {min_cost_idx}, Cost: {min_cost}, Angle: {joint1_angle}")
         
@@ -211,7 +211,7 @@ class PedicleScrewAutoPlanner:
             return np.array([0, 1, 0]), (0, 0), float('inf')
         
         h2_best = self.robot.link_2[:, :, min_cost_idx]
-        joint2_angle = self.robot.joint_2_limit[min_cost_idx]
+        joint2_angle = self.robot.joint_2_space[min_cost_idx]
         
         self.logger.info(f"Phase 2 complete. Best joint index: {min_cost_idx}, Cost: {min_cost}, Angle: {joint2_angle}")
         

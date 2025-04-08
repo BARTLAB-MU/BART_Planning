@@ -39,7 +39,9 @@ class Robot:
         self.resolution = resolution
         self.reach = reach
         self.joint_1_limit = [-180, 180]
-        self.joint_2_limit = [-90, 90]
+        self.joint_2_limit = [0, 45]
+        self.joint_1_space = np.linspace(self.joint_1_limit[0], self.joint_1_limit[1], self.resolution)
+        self.joint_2_space = np.linspace(self.joint_2_limit[0], self.joint_2_limit[1], self.resolution)
         
         # Generate joint space
         self.link_1 = self._create_link1_transforms()
