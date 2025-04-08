@@ -241,32 +241,29 @@ class PedicleScrewAutoPlanner:
             trajectory = trajectory / np.linalg.norm(trajectory)
             
             # Vertical angle (pitch) - in YZ plane
-            # Project to YZ plane first
             traj_yz = np.array([0, trajectory[1], trajectory[2]])
             traj_yz_norm = np.linalg.norm(traj_yz)
             
             if traj_yz_norm > 1e-6:
                 traj_yz = traj_yz / traj_yz_norm
-                # Calculate angle with Y axis [0,1,0]
                 cos_angle = np.clip(np.dot(traj_yz, [0, 1, 0]), -1.0, 1.0)
                 angle = np.arccos(cos_angle)
-                # Determine sign based on Z component
+                # Keep this sign convention since vertical angle appears to be correct
                 vertical_angle = np.degrees(angle) * (1 if trajectory[2] < 0 else -1)
             else:
                 vertical_angle = 0.0
             
             # Horizontal angle (yaw) - in XY plane
-            # Project to XY plane first
             traj_xy = np.array([trajectory[0], trajectory[1], 0])
             traj_xy_norm = np.linalg.norm(traj_xy)
             
             if traj_xy_norm > 1e-6:
                 traj_xy = traj_xy / traj_xy_norm
-                # Calculate angle with Y axis [0,1,0]
                 cos_angle = np.clip(np.dot(traj_xy, [0, 1, 0]), -1.0, 1.0)
                 angle = np.arccos(cos_angle)
-                # Determine sign based on X component
-                horizontal_angle = np.degrees(angle) * (1 if trajectory[0] > 0 else -1)
+                
+                # Flip the sign convention: positive for left (X<0), negative for right (X>0)
+                horizontal_angle = np.degrees(angle) * (-1 if trajectory[0] > 0 else 1)
             else:
                 horizontal_angle = 0.0
             
@@ -274,4 +271,6 @@ class PedicleScrewAutoPlanner:
             
         except Exception as e:
             self.logger.error(f"Error calculating angles: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return 0.0, 0.0
