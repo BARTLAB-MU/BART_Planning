@@ -4,6 +4,51 @@ import logging
 import slicer
 
 logger = logging.getLogger(__name__)
+    
+def get_penalized_volume(masked_volume_node, cache={}):
+    """
+    Creates or retrieves a cached penalized volume.
+    
+    Parameters:
+        masked_volume_node: vtkMRMLScalarVolumeNode containing the masked volume
+        cache: Dictionary to cache results (default uses a function-level cache)
+        
+    Returns:
+        vtkMRMLScalarVolumeNode: Volume node with penalties applied
+    """
+    # Use node ID as cache key
+    node_id = masked_volume_node.GetID()
+    
+    # Return cached result if available
+    if node_id in cache:
+        return cache[node_id]
+    
+    import slicer
+    import numpy as np
+    
+    # Extract the array data
+    volume_array = slicer.util.arrayFromVolume(masked_volume_node)
+    
+    # Create a copy and apply the penalty
+    penalized_array = volume_array.copy()
+    penalized_array[penalized_array == 0] = -1000
+    
+    # Create a new volume node
+    penalized_volume_node = slicer.mrmlScene.AddNewNodeByClass(
+        "vtkMRMLScalarVolumeNode", 
+        masked_volume_node.GetName() + "_Penalized"
+    )
+    
+    # Copy properties
+    penalized_volume_node.CopyOrientation(masked_volume_node)
+    
+    # Update with penalized array
+    slicer.util.updateVolumeFromArray(penalized_volume_node, penalized_array)
+    
+    # Cache the result
+    cache[node_id] = penalized_volume_node
+    
+    return penalized_volume_node
 
 def bresenham_3d(origin, endpoint, matrix):
     """
@@ -286,6 +331,7 @@ def sample_along_trajectory(volume_node, mask_node, start_point, direction, leng
     logger = logging.getLogger(__name__)
     
     try:
+
         # Convert to numpy arrays if not already
         start_point = np.array(start_point)
         direction = np.array(direction) / np.linalg.norm(direction)  # Ensure normalized
@@ -629,28 +675,22 @@ def cost_total(
     Returns:
         tuple: (total_cost, cost_components)
     """
+
+    penalized_volume = get_penalized_volume(volume_node)
+
     # Calculate distance cost (minimize)
     distance_value = distance_cost(insertion_point, trajectory_direction, pedicle_center)
     
     # Calculate density cost (maximize original value, so negate for minimization)
-    density_value = bone_density_cost(insertion_point, trajectory_direction, volume_node, mask_node, trajectory_length)
-    
-    # Since we want to maximize the density but minimize the distance,
-    # we need to invert the density cost
-    if density_value > 0:
-        # Normal case - invert density value to convert maximization to minimization
-        density_cost = -density_value  # Negative so lower values (to minimize) = higher density
-    else:
-        # Penalty case (outside segmentation) - keep the negative value
-        density_cost = density_value
+    density_cost = bone_density_cost(insertion_point, trajectory_direction, penalized_volume, mask_node, trajectory_length)
+
+    cost_components = {"distance": distance_value, "density": density_cost}
     
     # Apply weights
     if weights is not None and len(weights) >= 2:
-        total_cost = weights[0] * distance_value + weights[1] * density_cost
+        total_cost = weights[0] * (- distance_value) + weights[1] * density_cost
     else:
-        total_cost = distance_value + density_cost
-    
-    cost_components = {"distance": distance_value, "density": density_cost}
+        total_cost = (- distance_value) + density_cost
     
     return total_cost, cost_components
 
@@ -797,150 +837,3 @@ def visualize_search_result(vertebra, insertion_point, final_traj, angles, cost,
         import traceback
         logger.error(traceback.format_exc())
         return None, None, None, None
-    
-def test_distance_cost_function():
-    """
-    Test and validate the distance cost function with controlled inputs.
-    Creates a simple test case and visualizes the results.
-    
-    This function can be called from the Python console in Slicer to debug the cost function:
-        from BARTPedicleScrewSimulatorWizard.CostFunctions import test_distance_cost_function
-        test_distance_cost_function()
-    """
-    import slicer
-    import vtk
-    import numpy as np
-    import logging
-    
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)  # Set to DEBUG for detailed output
-    
-    # Create console handler if not already present
-    if not logger.handlers:
-        console = logging.StreamHandler()
-        console.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
-        console.setFormatter(formatter)
-        logger.addHandler(console)
-    
-    logger.info("Running distance cost function test...")
-    
-    # Create test case with known geometry
-    # Define a line that passes 5 units away from the origin
-    insertion_point = np.array([0.0, 0.0, 0.0])
-    trajectory_direction = np.array([0.0, 1.0, 0.0])  # Pointing along y-axis
-    pedicle_center = np.array([5.0, 10.0, 0.0])  # 5 units to the right, 10 units forward
-    
-    # Expected distance: 5.0 (x-component of pedicle_center)
-    expected_distance = 5.0
-    
-    # Calculate distance using our function
-    try:
-        from .CostFunctions import distance_cost, point_to_line_distance
-        
-        # Test distance_cost function
-        distance = distance_cost(insertion_point, trajectory_direction, pedicle_center)
-        logger.info(f"distance_cost result: {distance}")
-        logger.info(f"Expected result: {expected_distance}")
-        logger.info(f"Difference: {abs(distance - expected_distance)}")
-        
-        # Test point_to_line_distance function as well
-        distance2 = point_to_line_distance(pedicle_center, insertion_point, trajectory_direction)
-        logger.info(f"point_to_line_distance result: {distance2}")
-        logger.info(f"Expected result: {expected_distance}")
-        logger.info(f"Difference: {abs(distance2 - expected_distance)}")
-        
-    except Exception as e:
-        logger.error(f"Error during cost function test: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        
-    # Visualize the test case
-    try:
-        # Create a line source for the trajectory
-        line_source = vtk.vtkLineSource()
-        line_source.SetPoint1(insertion_point)
-        end_point = insertion_point + trajectory_direction * 20.0  # 20 units long
-        line_source.SetPoint2(end_point)
-        line_source.Update()
-        
-        # Create model for trajectory
-        trajectory_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TestTrajectory")
-        trajectory_model.SetAndObservePolyData(line_source.GetOutput())
-        
-        # Create display node for trajectory
-        display_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
-        display_node.SetColor(0.0, 1.0, 0.0)  # Green
-        display_node.SetLineWidth(2.0)
-        trajectory_model.SetAndObserveDisplayNodeID(display_node.GetID())
-        
-        # Create a sphere source for pedicle center
-        sphere_source = vtk.vtkSphereSource()
-        sphere_source.SetCenter(pedicle_center)
-        sphere_source.SetRadius(1.0)
-        sphere_source.Update()
-        
-        # Create model for pedicle center
-        center_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TestPedicleCenter")
-        center_model.SetAndObservePolyData(sphere_source.GetOutput())
-        
-        # Create display node for pedicle center
-        center_display = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
-        center_display.SetColor(1.0, 0.0, 0.0)  # Red
-        center_model.SetAndObserveDisplayNodeID(center_display.GetID())
-        
-        # Calculate closest point on trajectory to pedicle center
-        normalized_direction = trajectory_direction / np.linalg.norm(trajectory_direction)
-        vec_to_center = pedicle_center - insertion_point
-        projection = np.dot(vec_to_center, normalized_direction) * normalized_direction
-        closest_point = insertion_point + projection
-        
-        # Create line from pedicle center to closest point (perpendicular distance)
-        distance_line = vtk.vtkLineSource()
-        distance_line.SetPoint1(pedicle_center)
-        distance_line.SetPoint2(closest_point)
-        distance_line.Update()
-        
-        # Create model for distance line
-        distance_model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TestDistanceLine")
-        distance_model.SetAndObservePolyData(distance_line.GetOutput())
-        
-        # Create display node for distance line
-        distance_display = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
-        distance_display.SetColor(1.0, 1.0, 0.0)  # Yellow
-        distance_display.SetLineWidth(2.0)
-        distance_model.SetAndObserveDisplayNodeID(distance_display.GetID())
-        
-        # Change to 3D view
-        slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
-        
-        # Create a text annotation with the test results
-        test_info = (
-            f"Distance Cost Function Test\n"
-            f"----------------------------\n"
-            f"Insertion point: {insertion_point}\n"
-            f"Trajectory direction: {trajectory_direction}\n"
-            f"Pedicle center: {pedicle_center}\n"
-            f"Expected distance: {expected_distance}\n"
-            f"Calculated distance: {distance}\n"
-            f"Difference: {abs(distance - expected_distance)}\n"
-        )
-        
-        # Create a text node with the test info
-        text_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTextNode", "TestDistanceCostInfo")
-        text_node.SetText(test_info)
-        
-        # Display the text in the Python console
-        logger.info("\n" + test_info)
-        
-        return {
-            "trajectory_model": trajectory_model,
-            "center_model": center_model,
-            "distance_model": distance_model,
-            "text_node": text_node,
-            "distance": distance,
-            "expected_distance": expected_distance
-        }
-        
-    except Exception as e:
-        logger.error(f"Error during visualization: {str(e)}")

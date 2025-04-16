@@ -144,18 +144,18 @@ class PedicleScrewAutoPlanner:
                 cost_h1[i] = float('inf')
         
         # Find best first joint position
-        min_cost_idx = np.argmin(cost_h1)
-        min_cost = cost_h1[min_cost_idx]
+        max_cost_idx = np.argmax(cost_h1)
+        max_cost = cost_h1[max_cost_idx]
         
         # Check if valid solution was found
-        if np.isinf(min_cost):
+        if np.isinf(max_cost):
             self.logger.warning("No valid solution found in phase 1")
             return np.array([0, 1, 0]), (0, 0), float('inf')
         
-        h1_best = self.robot.link_1[:, :, min_cost_idx]
-        joint1_angle = self.robot.joint_1_space[min_cost_idx]
+        h1_best = self.robot.link_1[:, :, max_cost_idx]
+        joint1_angle = self.robot.joint_1_space[max_cost_idx]
         
-        self.logger.info(f"Phase 1 complete. Best joint index: {min_cost_idx}, Cost: {min_cost}, Angle: {joint1_angle}")
+        self.logger.info(f"Phase 1 complete. Best joint index: {max_cost_idx}, Cost: {max_cost}, Angle: {joint1_angle}")
         
         # Phase 2: Search in second joint space with fixed first joint
         self.logger.info("Phase 2: Searching in second joint space")
@@ -202,18 +202,18 @@ class PedicleScrewAutoPlanner:
                 cost_h2[i] = float('inf')
         
         # Find best second joint position
-        min_cost_idx = np.argmin(cost_h2)
-        min_cost = cost_h2[min_cost_idx]
+        max_cost_idx = np.argmax(cost_h2)
+        max_cost = cost_h2[max_cost_idx]
         
         # Check if valid solution was found
-        if np.isinf(min_cost):
+        if np.isinf(max_cost):
             self.logger.warning("No valid solution found in phase 2")
             return np.array([0, 1, 0]), (0, 0), float('inf')
         
-        h2_best = self.robot.link_2[:, :, min_cost_idx]
-        joint2_angle = self.robot.joint_2_space[min_cost_idx]
+        h2_best = self.robot.link_2[:, :, max_cost_idx]
+        joint2_angle = self.robot.joint_2_space[max_cost_idx]
         
-        self.logger.info(f"Phase 2 complete. Best joint index: {min_cost_idx}, Cost: {min_cost}, Angle: {joint2_angle}")
+        self.logger.info(f"Phase 2 complete. Best joint index: {max_cost_idx}, Cost: {max_cost}, Angle: {joint2_angle}")
         
         # Generate final trajectory
         best_transform = insertion_transform @ h1_best @ h2_best
@@ -223,7 +223,7 @@ class PedicleScrewAutoPlanner:
         vertical_angle, horizontal_angle = self.calculate_angles(final_traj)
         self.logger.info(f"Final trajectory angles: vertical={vertical_angle}, horizontal={horizontal_angle}")
         
-        return final_traj, (vertical_angle, horizontal_angle), min_cost
+        return final_traj, (vertical_angle, horizontal_angle), max_cost
     
     def calculate_angles(self, trajectory):
         """
