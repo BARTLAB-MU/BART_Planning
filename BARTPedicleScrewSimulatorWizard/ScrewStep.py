@@ -7,6 +7,8 @@ import math
 import os
 import time
 import logging
+from .Vertebra import *
+from .RobotInit import Robot
 
 class ScrewStep(PedicleScrewSimulatorStep):
 
@@ -61,6 +63,7 @@ class ScrewStep(PedicleScrewSimulatorStep):
       self.timer2.connect('timeout()', self.reverseScrew)
       self.screwInsert = 0.0
 
+      self.autoPlanner = None
 
     def killButton(self):
       bl = slicer.util.findChildren(text='Final')
@@ -202,6 +205,17 @@ class ScrewStep(PedicleScrewSimulatorStep):
       logging.debug("Coords: {0}".format(self.coords))
       self.updateMeasurements()
       self.cameraFocus(self.coords)
+
+      # Add Auto-Plan button after existing buttons
+      self.__autoButton = qt.QPushButton("Auto-Plan Trajectory")
+      self.__autoButton.enabled = True
+      self.__autoButton.setStyleSheet("background-color: purple; color: white;")
+      self.__autoButton.connect('clicked(bool)', self.runAutoPlanning)
+
+      # Add it to your layout - place after existing buttons
+      self.QHBox5 = qt.QHBoxLayout()
+      self.QHBox5.addWidget(self.__autoButton)
+      self.__layout.addRow(self.QHBox5)
 
     def insertScrew(self):
       logging.debug("insert")
@@ -1038,6 +1052,234 @@ class ScrewStep(PedicleScrewSimulatorStep):
         self.fiducial.addItems(self.fiduciallist)
 
         logging.debug(f"Combo box updated with fiduciallist: {self.fiduciallist}")
+
+    def runAutoPlanning(self):
+        """Run automatic trajectory planning for the selected insertion point"""
+        if not self.currentFidLabel:
+            qt.QMessageBox.warning(None, "Warning", "Please select an insertion point first.")
+            return
+            
+        # Get necessary data
+        pNode = self.parameterNode()
+        inputVolume = pNode.GetNodeReference('baselineVolume')
+        segmentation = slicer.mrmlScene.GetFirstNodeByName("Segmentation")
+        
+        if not segmentation:
+            qt.QMessageBox.warning(None, "Warning", "Segmentation not found. Please segment the vertebra first.")
+            return
+        
+        logging.info("Starting auto-planning...")
+        
+        # Create a progress dialog
+        progressDialog = qt.QProgressDialog("Running auto-planning...", "Cancel", 0, 100, slicer.util.mainWindow())
+        progressDialog.setWindowModality(qt.Qt.WindowModal)
+        progressDialog.setMinimumDuration(0)
+        progressDialog.setValue(10)
+        slicer.app.processEvents()
+        
+        try:
+            # Install joblib if not already installed
+            try:
+                import joblib
+            except ImportError:
+                progressDialog.setLabelText("Installing required packages...")
+                slicer.util.pip_install("joblib")
+                import joblib
+            
+            # Create a temporary labelmap node
+            progressDialog.setLabelText("Exporting segmentation...")
+            progressDialog.setValue(15)
+            slicer.app.processEvents()
+            
+            labelmapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "TempLabelmap")
+            
+            # Export ALL segments to the labelmap
+            segmentIDs = vtk.vtkStringArray()
+            segmentation.GetSegmentation().GetSegmentIDs(segmentIDs)
+            
+            if segmentIDs.GetNumberOfValues() == 0:
+                progressDialog.close()
+                qt.QMessageBox.warning(None, "Warning", "No segments found in segmentation.")
+                return
+            
+            # Export segments to labelmap
+            segmentationLogic = slicer.modules.segmentations.logic()
+            
+            # Export to labelmap node with reference geometry from input volume
+            success = segmentationLogic.ExportVisibleSegmentsToLabelmapNode(
+                segmentation, labelmapNode, inputVolume)
+            
+            if not success:
+                progressDialog.close()
+                qt.QMessageBox.warning(None, "Warning", "Failed to export segmentation to labelmap.")
+                return
+            
+            progressDialog.setValue(20)
+            slicer.app.processEvents()
+            
+            # Extract target level from the fiducial label
+            target_level = None
+            if self.currentFidLabel:
+                # Parse level from label like "Fid1 - L4 - Right"
+                parts = self.currentFidLabel.split(" - ")
+                if len(parts) >= 2:
+                    target_level = parts[1].strip()
+                    logging.info(f"Target level extracted from fiducial: {target_level}")
+            
+            # Create the Vertebra object with target level
+            progressDialog.setLabelText("Processing vertebra geometry...")
+            slicer.app.processEvents()
+            
+            from .Vertebra import Vertebra
+            from .CostFunctions import visualize_search_result
+            
+            insertion_coords = [0, 0, 0]
+            self.fidNode.GetNthControlPointPosition(self.currentFidIndex, insertion_coords)
+            
+            try:
+                # Create vertebra with target level
+                vertebra = Vertebra(labelmapNode, inputVolume, insertion_coords, target_level)
+                progressDialog.setValue(30)
+                slicer.app.processEvents()
+                
+                # Initialize auto planner if not already done
+                progressDialog.setLabelText("Initializing trajectory planner...")
+                slicer.app.processEvents()
+                
+                if not self.autoPlanner:
+                    from .AutoPlanner import PedicleScrewAutoPlanner
+                    
+                    # Create a custom progress update callback that works with different Qt versions
+                    def progress_callback(phase, iteration, max_iterations):
+                        if phase == 1:  # First joint search
+                            # Map progress from 0-100% of first phase to 40-60% of overall progress
+                            progress = 40 + (iteration / max_iterations) * 20
+                        else:  # Second joint search
+                            # Map progress from 0-100% of second phase to 60-90% of overall progress
+                            progress = 60 + (iteration / max_iterations) * 30
+                        
+                        progressDialog.setValue(int(progress))
+                        progressDialog.setLabelText(f"Searching {phase}/2: {iteration}/{max_iterations}")
+                        slicer.app.processEvents()
+                        
+                        # Check for cancel button - handle both property and method cases
+                        try:
+                            # Try as a method first
+                            if hasattr(progressDialog, 'wasCanceled') and callable(getattr(progressDialog, 'wasCanceled')):
+                                return progressDialog.wasCanceled()
+                            # Then try as a property
+                            elif hasattr(progressDialog, 'wasCanceled'):
+                                return bool(progressDialog.wasCanceled)
+                            # Fallback
+                            else:
+                                return False
+                        except Exception as e:
+                            logging.error(f"Error checking cancel status: {str(e)}")
+                            return False
+                    
+                    # Create auto planner with focus on distance cost
+                    # Set the weight vector with high weight on distance cost, zero on others
+                    self.autoPlanner = PedicleScrewAutoPlanner(
+                        resolution=200,  # Lower resolution for faster results
+                        reach= int(self.__length),
+                        diameter= float(self.__diameter),
+                        weight=[1.0, 0.005],
+                        penalty=-10000,
+                        progress_callback=progress_callback
+                    )
+                else:
+                    # Update the existing auto planner's progress callback
+                    def progress_callback(phase, iteration, max_iterations):
+                        if phase == 1:  # First joint search
+                            progress = 40 + (iteration / max_iterations) * 20
+                        else:  # Second joint search
+                            progress = 60 + (iteration / max_iterations) * 30
+                        
+                        progressDialog.setValue(int(progress))
+                        progressDialog.setLabelText(f"Searching {phase}/2: {iteration}/{max_iterations}")
+                        slicer.app.processEvents()
+                        
+                        # Check for cancel button - handle both property and method cases
+                        try:
+                            # Try as a method first
+                            if hasattr(progressDialog, 'wasCanceled') and callable(getattr(progressDialog, 'wasCanceled')):
+                                return progressDialog.wasCanceled()
+                            # Then try as a property
+                            elif hasattr(progressDialog, 'wasCanceled'):
+                                return bool(progressDialog.wasCanceled)
+                            # Fallback
+                            else:
+                                return False
+                        except Exception as e:
+                            logging.error(f"Error checking cancel status: {str(e)}")
+                            return False
+                    
+                    self.autoPlanner.progress_callback = progress_callback
+                    
+                    # Update weights to focus only on distance cost
+                
+                # Run the trajectory planning
+                progressDialog.setValue(40)
+                progressDialog.setLabelText("Searching for optimal trajectory (phase 1/2)...")
+                slicer.app.processEvents()
+                
+                # Run the actual planning
+                final_traj, angles, cost = self.autoPlanner.plan_trajectory(vertebra, insertion_coords)
+                vertical_angle, horizontal_angle = angles
+                
+                # Apply angles to the sliders
+                progressDialog.setValue(95)
+                progressDialog.setLabelText("Finalizing results...")
+                slicer.app.processEvents()
+                
+                logging.info(f"Setting angles: Vertical = {vertical_angle}°, Horizontal = {horizontal_angle}°")
+                self.transformSlider1.setValue(vertical_angle)
+                self.transformSlider2.setValue(horizontal_angle)
+                
+                # Visualize the final trajectory
+                viz_nodes = visualize_search_result(
+                    vertebra,
+                    insertion_coords,
+                    final_traj,
+                    angles,
+                    cost,
+                    name_prefix="Optimal"
+                )
+                
+                progressDialog.setValue(100)
+                slicer.app.processEvents()
+                
+                # Clean up
+                slicer.mrmlScene.RemoveNode(labelmapNode)
+                
+                # Show detailed report
+                qt.QMessageBox.information(None, "Auto-Planning", 
+                                        f"Trajectory planning completed successfully.\n\n"
+                                        f"Vertical angle: {vertical_angle:.1f}°\n"
+                                        f"Horizontal angle: {horizontal_angle:.1f}°\n"
+                                        f"Distance from pedicle center: {cost:.2f} mm\n"
+                                        f"Level: {target_level}\n\n"
+                                        f"The trajectory has been visualized and the angles have been set."
+                                        f"You can now adjust, insert, or save the screw using the controls.")
+                
+            except Exception as e:
+                logging.error(f"Vertebra processing error: {str(e)}")
+                import traceback
+                logging.error(traceback.format_exc())
+                progressDialog.close()
+                qt.QMessageBox.critical(None, "Error", f"Vertebra processing failed: {str(e)}")
+                    
+        except Exception as e:
+            logging.error(f"Auto-planning error: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            progressDialog.close()
+            qt.QMessageBox.critical(None, "Error", f"Auto-planning failed: {str(e)}")
+
+        finally:
+            progressDialog.close()
+            if 'labelmapNode' in locals() and labelmapNode is not None:
+                slicer.mrmlScene.RemoveNode(labelmapNode)
 
     def onEntry(self, comingFrom, transitionType):
 
