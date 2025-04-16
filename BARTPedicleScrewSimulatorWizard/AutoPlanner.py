@@ -9,7 +9,7 @@ class PedicleScrewAutoPlanner:
     Automatic trajectory planning for pedicle screws using robot kinematics
     and cost function optimization.
     """
-    def __init__(self, resolution=1000, reach=50, weight=None, progress_callback=None):
+    def __init__(self, resolution=1000, reach=50, diameter=None, weight=None,penalty=-1000, progress_callback=None):
         """
         Initialize the auto planner with the specified parameters.
         
@@ -24,7 +24,9 @@ class PedicleScrewAutoPlanner:
         
         self.resolution = resolution
         self.reach = reach
+        self.diameter = diameter
         self.weight = weight
+        self.penalty = penalty
         self.progress_callback = progress_callback
         self.logger = logging.getLogger(__name__)
         
@@ -135,7 +137,9 @@ class PedicleScrewAutoPlanner:
                     self.weight, 
                     vertebra.maskedVolume,
                     mask_node if mask_node else None,
-                    self.reach
+                    self.reach,
+                    self.diameter,
+                    self.penalty
                 )
                 cost_h1[i] = total_cost
                 self.logger.info(f"Searched {transform}: {cost_components}")
@@ -184,7 +188,7 @@ class PedicleScrewAutoPlanner:
             
             try:
                 # Calculate cost for this trajectory using only distance and density costs
-                total_cost, _ = cost_total(
+                total_cost, cost_components = cost_total(
                     insertion_point, 
                     traj,
                     vertebra.point_cloud, 
@@ -193,7 +197,9 @@ class PedicleScrewAutoPlanner:
                     self.weight, 
                     vertebra.maskedVolume,
                     mask_node if mask_node else None,
-                    self.reach
+                    self.reach,
+                    self.diameter,
+                    self.penalty
                 )
                 cost_h2[i] = total_cost
                 self.logger.info(f"Searched {transform}: {cost_components}")

@@ -5,7 +5,7 @@ import slicer
 
 logger = logging.getLogger(__name__)
     
-def get_penalized_volume(masked_volume_node, cache={}):
+def get_penalized_volume(masked_volume_node,penalty=-1000, cache={}):
     """
     Creates or retrieves a cached penalized volume.
     
@@ -31,7 +31,7 @@ def get_penalized_volume(masked_volume_node, cache={}):
     
     # Create a copy and apply the penalty
     penalized_array = volume_array.copy()
-    penalized_array[penalized_array == 0] = -1000
+    penalized_array[penalized_array == 0] = penalty
     
     # Create a new volume node
     penalized_volume_node = slicer.mrmlScene.AddNewNodeByClass(
@@ -50,20 +50,24 @@ def get_penalized_volume(masked_volume_node, cache={}):
     
     return penalized_volume_node
 
-def bresenham_3d(origin, endpoint, matrix):
+def bresenham_3d(origin, endpoint, matrix, diameter=1):
     """
     Draw a 3D line between origin and endpoint in the voxel matrix using Bresenham's algorithm.
-    Returns a binary mask where line voxels are 1 and others are 0.
+    If diameter > 1, draws a cylinder with the specified diameter.
+    Returns a binary mask where cylinder voxels are 1 and others are 0.
     
     Parameters:
         origin (array): [x, y, z] start point
         endpoint (array): [x, y, z] end point
         matrix (array): 3D numpy array representing the volume
+        diameter (float): Diameter of the cylinder in voxels (default: 1)
         
     Returns:
         array: Binary mask with same dimensions as matrix
     """
     try:
+        import numpy as np
+        
         # Get matrix dimensions
         matrix_size = matrix.shape
         
@@ -96,14 +100,99 @@ def bresenham_3d(origin, endpoint, matrix):
         # Create result matrix
         result = np.zeros(matrix_size, dtype=np.uint8)
         
-        # Draw line using Bresenham's algorithm
+        # If diameter <= 1, just draw the line
+        if diameter <= 1:
+            # Draw line using Bresenham's algorithm
+            x, y, z = x1, y1, z1
+            
+            for i in range(nsteps + 1):
+                # Check if point is within bounds
+                if 0 <= x < matrix_size[0] and 0 <= y < matrix_size[1] and 0 <= z < matrix_size[2]:
+                    result[x, y, z] = 1
+                    
+                # Update coordinates based on dominant axis
+                if dx >= dy and dx >= dz:
+                    if err_y >= 0:
+                        y += sy
+                        err_y -= 2 * dx
+                    if err_z >= 0:
+                        z += sz
+                        err_z -= 2 * dx
+                    err_y += 2 * dy
+                    err_z += 2 * dz
+                    x += sx
+                elif dy >= dx and dy >= dz:
+                    if err_x >= 0:
+                        x += sx
+                        err_x -= 2 * dy
+                    if err_z >= 0:
+                        z += sz
+                        err_z -= 2 * dy
+                    err_x += 2 * dx
+                    err_z += 2 * dz
+                    y += sy
+                else:
+                    if err_x >= 0:
+                        x += sx
+                        err_x -= 2 * dz
+                    if err_y >= 0:
+                        y += sy
+                        err_y -= 2 * dz
+                    err_x += 2 * dx
+                    err_y += 2 * dy
+                    z += sz
+            
+            return result
+        
+        # For cylinder, we need the line direction
+        direction = np.array([x2 - x1, y2 - y1, z2 - z1], dtype=float)
+        norm = np.linalg.norm(direction)
+        if norm > 0:
+            direction = direction / norm
+        
+        # Draw line using Bresenham's algorithm and expand to cylinder
         x, y, z = x1, y1, z1
+        radius = diameter / 2.0
+        radius_sqr = radius ** 2
         
         for i in range(nsteps + 1):
-            # Check if point is within bounds
+            # Expand to cylinder at this point
+            # Calculate bounds for the local region to check
+            r_ceil = int(np.ceil(radius))
+            x_min = max(0, x - r_ceil)
+            x_max = min(matrix_size[0] - 1, x + r_ceil)
+            y_min = max(0, y - r_ceil)
+            y_max = min(matrix_size[1] - 1, y + r_ceil)
+            z_min = max(0, z - r_ceil)
+            z_max = min(matrix_size[2] - 1, z + r_ceil)
+            
+            # Set point on central axis
             if 0 <= x < matrix_size[0] and 0 <= y < matrix_size[1] and 0 <= z < matrix_size[2]:
                 result[x, y, z] = 1
-                
+            
+            # Check each point in the neighborhood
+            for px in range(x_min, x_max + 1):
+                for py in range(y_min, y_max + 1):
+                    for pz in range(z_min, z_max + 1):
+                        # Skip if already set
+                        if result[px, py, pz] == 1:
+                            continue
+                        
+                        # Calculate distance from point to line
+                        # The line is defined by point (x,y,z) and direction 'direction'
+                        point_vec = np.array([px - x, py - y, pz - z], dtype=float)
+                        
+                        # Project point_vec onto direction
+                        proj = np.dot(point_vec, direction) * direction
+                        
+                        # Perpendicular distance
+                        perp = point_vec - proj
+                        dist_sqr = np.dot(perp, perp)
+                        
+                        # If within radius, set the voxel
+                        if dist_sqr <= radius_sqr:
+                            result[px, py, pz] = 1
+            
             # Update coordinates based on dominant axis
             if dx >= dy and dx >= dz:
                 if err_y >= 0:
@@ -309,7 +398,7 @@ def gen_traj(base, ee):
     # Normalize
     return vec / np.linalg.norm(vec)
 
-def sample_along_trajectory(volume_node, mask_node, start_point, direction, length, num_samples=50):
+def sample_along_trajectory(volume_node, mask_node, start_point, direction, length, num_samples=50, diameter=1):
     """
     Sample CT values and mask values along a trajectory using Bresenham's algorithm.
     
@@ -320,6 +409,7 @@ def sample_along_trajectory(volume_node, mask_node, start_point, direction, leng
         direction (array): Direction vector (normalized)
         length (float): Length of trajectory
         num_samples (int): Number of samples to take
+        diameter (float): Diameter of the cylinder in voxels (default: 1)
         
     Returns:
         tuple: (ct_samples, mask_samples) Arrays of CT and mask values
@@ -331,7 +421,6 @@ def sample_along_trajectory(volume_node, mask_node, start_point, direction, leng
     logger = logging.getLogger(__name__)
     
     try:
-
         # Convert to numpy arrays if not already
         start_point = np.array(start_point)
         direction = np.array(direction) / np.linalg.norm(direction)  # Ensure normalized
@@ -365,74 +454,20 @@ def sample_along_trajectory(volume_node, mask_node, start_point, direction, leng
         mask_image = mask_node.GetImageData()
         mask_dims = mask_image.GetDimensions()
         
-        # Initialize points list
-        points = []
+        # Create a 3D matrix with the same dimensions as volume for Bresenham's algorithm
+        volume_matrix = np.zeros(volume_dims, dtype=np.uint8)
         
-        # Add the starting point
-        points.append((start_ijk[0], start_ijk[1], start_ijk[2]))
+        # Call our bresenham_3d function to get the cylindrical trajectory mask
+        trajectory_mask = bresenham_3d(start_ijk, end_ijk, volume_matrix, diameter)
         
-        # Use Bresenham's 3D line algorithm
-        # Based on https://www.geeksforgeeks.org/bresenhams-algorithm-for-3d-line-drawing/
-        x1, y1, z1 = start_ijk
-        x2, y2, z2 = end_ijk
+        # Find all points in the trajectory (where mask is 1)
+        trajectory_points = np.where(trajectory_mask > 0)
+        points = list(zip(trajectory_points[0], trajectory_points[1], trajectory_points[2]))
         
-        dx = abs(x2 - x1)
-        dy = abs(y2 - y1)
-        dz = abs(z2 - z1)
-        
-        xs = 1 if x2 > x1 else -1
-        ys = 1 if y2 > y1 else -1
-        zs = 1 if z2 > z1 else -1
-        
-        # Choosing the driving axis
-        if dx >= dy and dx >= dz:
-            p1 = 2 * dy - dx
-            p2 = 2 * dz - dx
-            while x1 != x2:
-                x1 += xs
-                if p1 >= 0:
-                    y1 += ys
-                    p1 -= 2 * dx
-                if p2 >= 0:
-                    z1 += zs
-                    p2 -= 2 * dx
-                p1 += 2 * dy
-                p2 += 2 * dz
-                points.append((x1, y1, z1))
-        elif dy >= dx and dy >= dz:
-            p1 = 2 * dx - dy
-            p2 = 2 * dz - dy
-            while y1 != y2:
-                y1 += ys
-                if p1 >= 0:
-                    x1 += xs
-                    p1 -= 2 * dy
-                if p2 >= 0:
-                    z1 += zs
-                    p2 -= 2 * dy
-                p1 += 2 * dx
-                p2 += 2 * dz
-                points.append((x1, y1, z1))
-        else:
-            p1 = 2 * dy - dz
-            p2 = 2 * dx - dz
-            while z1 != z2:
-                z1 += zs
-                if p1 >= 0:
-                    y1 += ys
-                    p1 -= 2 * dz
-                if p2 >= 0:
-                    x1 += xs
-                    p2 -= 2 * dz
-                p1 += 2 * dy
-                p2 += 2 * dx
-                points.append((x1, y1, z1))
-        
-        # Sample at evenly spaced points along the line
+        # Sample at evenly spaced points if we have more than needed
         if len(points) > num_samples:
-            # Subsample if we have more points than needed
             indices = np.linspace(0, len(points)-1, num_samples, dtype=int)
-            points = [points[i] for i in indices]
+            points = [points[int(i)] for i in indices]
         
         # Initialize arrays for CT and mask values
         ct_samples = []
@@ -595,7 +630,7 @@ def distance_cost(insertion_point, trajectory_direction, pedicle_center):
         logger.error(traceback.format_exc())
         return float('inf')
     
-def bone_density_cost(insertion_point, trajectory_direction, volume_node, mask_node, trajectory_length, num_samples=50):
+def bone_density_cost(insertion_point, trajectory_direction, volume_node, mask_node, trajectory_length, screw_diameter=None, num_samples=50):
     """
     Calculate cost based on bone density along the trajectory.
     Higher density (cortical bone) is preferred for stronger fixation.
@@ -606,6 +641,7 @@ def bone_density_cost(insertion_point, trajectory_direction, volume_node, mask_n
         volume_node (vtkMRMLScalarVolumeNode): CT volume node
         mask_node (vtkMRMLLabelMapVolumeNode): Segmentation mask
         trajectory_length (float): Maximum length of trajectory
+        screw_diameter (float): Diameter of the screw in mm (optional)
         num_samples (int): Number of points to sample along trajectory
         
     Returns:
@@ -617,19 +653,25 @@ def bone_density_cost(insertion_point, trajectory_direction, volume_node, mask_n
     logger = logging.getLogger(__name__)
     
     try:
-        # Sample CT values and mask values along the trajectory using Bresenham's algorithm
+        # Convert screw diameter from mm to voxels if provided
+        diameter_voxels = 1  # Default diameter in voxels
+        if screw_diameter is not None:
+            # Get voxel spacing from volume node
+            spacing = volume_node.GetSpacing()
+            # Use the minimum spacing to ensure we don't undersample
+            min_spacing = min(spacing)
+            diameter_voxels = screw_diameter / min_spacing
+        
+        # Sample CT values and mask values along the trajectory
         ct_samples, mask_samples = sample_along_trajectory(
             volume_node, 
             mask_node,
             insertion_point, 
             trajectory_direction, 
             trajectory_length, 
-            num_samples
+            num_samples,
+            diameter=diameter_voxels
         )
-        
-        if len(ct_samples) == 0:
-            logger.warning("No samples collected along trajectory")
-            return -1000.0  # Large negative penalty for invalid trajectory
         
         # Calculate the average HU value along the trajectory
         # Higher HU values (cortical bone) are better for screw fixation
@@ -654,7 +696,9 @@ def cost_total(
     weights,
     volume_node,
     mask_node,
-    trajectory_length
+    trajectory_length,
+    screw_diameter=None,
+    penalty=-1000
 ):
     """
     Calculate the total cost of a trajectory:
@@ -676,13 +720,13 @@ def cost_total(
         tuple: (total_cost, cost_components)
     """
 
-    penalized_volume = get_penalized_volume(volume_node)
+    penalized_volume = get_penalized_volume(volume_node, penalty)
 
     # Calculate distance cost (minimize)
     distance_value = distance_cost(insertion_point, trajectory_direction, pedicle_center)
     
     # Calculate density cost (maximize original value, so negate for minimization)
-    density_cost = bone_density_cost(insertion_point, trajectory_direction, penalized_volume, mask_node, trajectory_length)
+    density_cost = bone_density_cost(insertion_point, trajectory_direction, penalized_volume, mask_node, trajectory_length, screw_diameter)
 
     cost_components = {"distance": distance_value, "density": density_cost}
     

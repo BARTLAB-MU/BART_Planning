@@ -1186,7 +1186,9 @@ class ScrewStep(PedicleScrewSimulatorStep):
                     self.autoPlanner = PedicleScrewAutoPlanner(
                         resolution=200,  # Lower resolution for faster results
                         reach= int(self.__length),
-                        weight=[1.0, 0.01],
+                        diameter= float(self.__diameter),
+                        weight=[1.0, 0.005],
+                        penalty=-10000,
                         progress_callback=progress_callback
                     )
                 else:
